@@ -23,7 +23,7 @@ st.set_page_config(
 # ── Modern UI Stylesheet ──────────────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 /* ── Typography & Reset ── */
 html, body, [class*="css"], [data-testid="stAppViewContainer"] {
@@ -125,13 +125,13 @@ html, body, [class*="css"], [data-testid="stAppViewContainer"] {
     transition: all 0.25s ease;
 }
 .step-card.active {
-    background: rgba(99, 102, 241, 0.08);
-    border-color: rgba(99, 102, 241, 0.45);
-    box-shadow: 0 4px 20px rgba(99, 102, 241, 0.15);
+    background: rgba(99, 102, 241, 0.12);
+    border-color: rgba(99, 102, 241, 0.55);
+    box-shadow: 0 4px 20px rgba(99, 102, 241, 0.2);
 }
 .step-card.done {
-    background: rgba(16, 185, 129, 0.06);
-    border-color: rgba(16, 185, 129, 0.35);
+    background: rgba(16, 185, 129, 0.08);
+    border-color: rgba(16, 185, 129, 0.4);
 }
 .step-header {
     display: flex;
@@ -157,8 +157,8 @@ html, body, [class*="css"], [data-testid="stAppViewContainer"] {
     font-weight: 600;
 }
 .status-waiting { color: #64748b; }
-.status-running { color: #818cf8; }
-.status-done    { color: #34d399; }
+.status-running { color: #818cf8; font-weight: 700; }
+.status-done    { color: #34d399; font-weight: 700; }
 .step-desc {
     font-size: 0.8rem;
     color: #94a3b8;
@@ -243,15 +243,6 @@ html, body, [class*="css"], [data-testid="stAppViewContainer"] {
     transform: translateY(-2px) !important;
     box-shadow: 0 6px 24px rgba(249, 115, 22, 0.45) !important;
 }
-
-/* ── Report Card ── */
-.report-container {
-    background: rgba(15, 23, 42, 0.6);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 14px;
-    padding: 2.2rem 2.5rem;
-    line-height: 1.8;
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -315,8 +306,8 @@ if not system_ready:
         st.markdown("""
         ### Setup Instructions:
         
-        #### 1. On Streamlit Community Cloud (Public Deployment):
-        1. Click the **three dots `⋮`** at the bottom-right of your screen (or open the side drawer).
+        #### 1. On Streamlit Community Cloud:
+        1. Click the **three dots `⋮`** at the bottom-right of your screen.
         2. Select **Settings** ⚙️ from the menu.
         3. Click on the **Secrets** tab in the popup.
         4. Paste your API keys in the text box:
@@ -348,7 +339,7 @@ with col_left:
         )
         run_btn = st.button("🚀  Run Research Pipeline", use_container_width=True)
 
-    # Interactive Example Chips (Clicking immediately populates the input)
+    # Interactive Example Chips
     st.caption("💡 Quick-fill example topics:")
     ex_cols = st.columns(3)
     if ex_cols[0].button("🧬 CRISPR 2025", use_container_width=True, help="Load CRISPR gene editing topic"):
@@ -363,41 +354,45 @@ with col_left:
 
 with col_right:
     st.markdown("#### Agent Pipeline Workflow")
+    cards_placeholder = st.empty()
 
-    r = st.session_state.results
+    def generate_cards_html(active_step: str = "", current_res: dict = None) -> str:
+        res = current_res if current_res is not None else st.session_state.results
+        steps = [
+            ("01", "Search Agent", "search", "Multi-source web discovery & URL deduplication"),
+            ("02", "Reader Agent", "reader", "Deep-content extraction from 3–5 unique URLs with fallback"),
+            ("03", "Writer Agent", "writer", "Synthesizes structured 6-section academic report"),
+            ("04", "Critic Agent", "critic", "Audits evidence, scores depth, and triggers refinement (max 2 loops)"),
+        ]
 
-    def get_step_state(step_name: str) -> str:
-        if not r:
-            return "waiting"
-        steps = ["search", "reader", "writer", "critic"]
-        if step_name in r and r[step_name]:
-            return "done"
-        if st.session_state.running:
-            for k in steps:
-                if k not in r or not r[k]:
-                    return "running" if k == step_name else "waiting"
-        return "waiting"
+        html_parts = []
+        for num, title, key, desc in steps:
+            if key in res and res[key]:
+                state_label = "✓ DONE"
+                state_cls = "status-done"
+                card_cls = "done"
+            elif active_step == key or (active_step == "refiner" and key == "writer"):
+                state_label = "● ACTIVE"
+                state_cls = "status-running"
+                card_cls = "active"
+            else:
+                state_label = "WAITING"
+                state_cls = "status-waiting"
+                card_cls = ""
 
-    def render_card(num: str, title: str, state: str, desc: str):
-        label_map = {"waiting": "WAITING", "running": "● ACTIVE", "done": "✓ DONE"}
-        cls_map = {"waiting": "status-waiting", "running": "status-running", "done": "status-done"}
-        card_cls = {"running": "active", "done": "done"}.get(state, "")
-
-        st.markdown(f"""
-        <div class="step-card {card_cls}">
-            <div class="step-header">
-                <span class="step-num">{num}</span>
-                <span class="step-title">{title}</span>
-                <span class="step-status {cls_map[state]}">{label_map[state]}</span>
+            html_parts.append(f"""
+            <div class="step-card {card_cls}">
+                <div class="step-header">
+                    <span class="step-num">{num}</span>
+                    <span class="step-title">{title}</span>
+                    <span class="step-status {state_cls}">{state_label}</span>
+                </div>
+                <div class="step-desc">{desc}</div>
             </div>
-            <div class="step-desc">{desc}</div>
-        </div>
-        """, unsafe_allow_html=True)
+            """)
+        return "".join(html_parts)
 
-    render_card("01", "Search Agent", get_step_state("search"), "Multi-source web discovery & URL deduplication")
-    render_card("02", "Reader Agent", get_step_state("reader"), "Deep-content extraction from 3–5 unique URLs with fallback")
-    render_card("03", "Writer Agent", get_step_state("writer"), "Synthesizes structured 6-section academic report")
-    render_card("04", "Critic Agent", get_step_state("critic"), "Audits evidence, scores depth, and triggers refinement (max 2 loops)")
+    cards_placeholder.markdown(generate_cards_html(), unsafe_allow_html=True)
 
 # ── Pipeline Execution Controller ─────────────────────────────────────────────
 if run_btn:
@@ -424,12 +419,20 @@ if st.session_state.running and not st.session_state.done:
     status_bar = st.empty()
 
     def on_step_start(step_key: str, step_title: str, description: str):
-        icons = {"search": "🔍", "reader": "📄", "writer": "✍️", "critic": "🧐"}
+        icons = {"search": "🔍", "reader": "📄", "writer": "✍️", "critic": "🧐", "refiner": "🔄"}
         icon = icons.get(step_key, "⚡")
         status_bar.info(f"{icon} **{step_title}**: {description}")
+        cards_placeholder.markdown(
+            generate_cards_html(active_step=step_key, current_res=st.session_state.results),
+            unsafe_allow_html=True
+        )
 
     def on_step_complete(step_key: str, output: str, current_state: dict):
         st.session_state.results = dict(current_state)
+        cards_placeholder.markdown(
+            generate_cards_html(active_step="", current_res=current_state),
+            unsafe_allow_html=True
+        )
 
     try:
         logger.info("Executing pipeline for topic: %s", active_topic)
