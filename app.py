@@ -514,9 +514,17 @@ if r and ("writer" in r or "report" in r):
     with tab_critic:
         evaluations = r.get("evaluations", [])
         refinements = r.get("refinement_attempts", 0)
-        latest_eval = evaluations[-1] if evaluations else {}
-        score = latest_eval.get("score", 8.0)
-        verdict = latest_eval.get("verdict", "Evaluation completed.")
+        latest_eval = evaluations[-1] if evaluations else None
+
+        score = 8.0
+        verdict = "Evaluation completed."
+        if latest_eval:
+            if isinstance(latest_eval, dict):
+                score = float(latest_eval.get("score", 8.0))
+                verdict = str(latest_eval.get("verdict", "Evaluation completed."))
+            elif hasattr(latest_eval, "score"):
+                score = float(getattr(latest_eval, "score", 8.0))
+                verdict = str(getattr(latest_eval, "verdict", "Evaluation completed."))
 
         st.markdown(f"""
         <div class="score-box">

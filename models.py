@@ -161,6 +161,7 @@ class PipelineResult(BaseModel):
             "critic": final_critic_md,
             "feedback": final_critic_md,
             "critic_model": self.final_critic_evaluation,
-            "evaluations": self.critic_evaluations,
+            "evaluations": [ev.model_dump() if hasattr(ev, "model_dump") else ev for ev in self.critic_evaluations],
+            "evaluation_models": self.critic_evaluations,
             "refinement_attempts": self.refinement_attempts,
         }
