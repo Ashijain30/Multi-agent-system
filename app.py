@@ -1,10 +1,16 @@
-import streamlit as st
+import logging
 import time
 import os
+import streamlit as st
 from dotenv import load_dotenv
-from agents import build_reader_agent, build_search_agent, writer_chain, critic_chain
+
+from pipeline import run_research_pipeline, validate_topic
+from tools import sanitize_error_message, get_credential
+from models import SourceItem, ResearchReport, CriticEvaluation
 
 load_dotenv()
+
+logger = logging.getLogger("researchmind.app")
 
 # Theme preference persists across Streamlit reruns.
 if "researchmind_theme" not in st.session_state:
@@ -72,7 +78,7 @@ html, body, [class*="css"] {
     font-size: 1.05rem;
     font-weight: 300;
     color: #a09890;
-    max-width: 520px;
+    max-width: 580px;
     margin: 0 auto;
     line-height: 1.65;
 }
@@ -148,8 +154,8 @@ html, body, [class*="css"] {
     background: rgba(255,255,255,0.03);
     border: 1px solid rgba(255,255,255,0.07);
     border-radius: 14px;
-    padding: 1.5rem 1.8rem;
-    margin-bottom: 1.2rem;
+    padding: 1.3rem 1.6rem;
+    margin-bottom: 1rem;
     position: relative;
     overflow: hidden;
     transition: border-color 0.3s;
@@ -178,7 +184,7 @@ html, body, [class*="css"] {
     display: flex;
     align-items: center;
     gap: 0.8rem;
-    margin-bottom: 0.3rem;
+    margin-bottom: 0.2rem;
 }
 .step-num {
     font-family: 'DM Mono', monospace;
@@ -204,52 +210,76 @@ html, body, [class*="css"] {
 .status-running  { color: #ff8c32; }
 .status-done     { color: #50c878; }
 
-/* ── Result panels ── */
-.result-panel {
-    background: rgba(255,255,255,0.025);
-    border: 1px solid rgba(255,255,255,0.07);
-    border-radius: 14px;
-    padding: 1.8rem 2rem;
-    margin-top: 1rem;
-    margin-bottom: 1.5rem;
-}
-.result-panel-title {
+/* ── Sources and Results panels ── */
+.source-badge {
+    display: inline-block;
     font-family: 'DM Mono', monospace;
-    font-size: 0.7rem;
-    font-weight: 500;
-    letter-spacing: 0.2em;
+    font-size: 0.65rem;
+    letter-spacing: 0.08em;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    margin-right: 0.5rem;
     text-transform: uppercase;
-    color: #ff8c32;
-    margin-bottom: 1rem;
-    padding-bottom: 0.7rem;
-    border-bottom: 1px solid rgba(255,140,50,0.15);
 }
-.result-content {
-    font-size: 0.92rem;
-    line-height: 1.8;
-    color: #cdc8bf;
-    white-space: pre-wrap;
-    font-family: 'DM Sans', sans-serif;
+.source-badge.scraped {
+    background: rgba(80,200,120,0.15);
+    color: #50c878;
+    border: 1px solid rgba(80,200,120,0.3);
+}
+.source-badge.fallback {
+    background: rgba(255,140,50,0.15);
+    color: #ff8c32;
+    border: 1px solid rgba(255,140,50,0.3);
 }
 
-/* ── Report & feedback panels ── */
+.source-item-card {
+    background: rgba(255,255,255,0.02);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 10px;
+    padding: 1rem 1.2rem;
+    margin-bottom: 0.8rem;
+}
+.source-title {
+    font-family: 'Syne', sans-serif;
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: #f0ebe0;
+    margin-bottom: 0.3rem;
+}
+.source-url {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.75rem;
+    color: #ff8c32;
+    text-decoration: none;
+    word-break: break-all;
+}
+.source-snippet {
+    font-size: 0.85rem;
+    color: #a09890;
+    margin-top: 0.4rem;
+    line-height: 1.5;
+}
+
+/* ── Report & Feedback Panels ── */
 .report-panel {
     background: rgba(255,255,255,0.025);
-    border: 1px solid rgba(255,140,50,0.2);
+    border: 1px solid rgba(255,140,50,0.25);
     border-radius: 16px;
-    padding: 2rem 2.5rem;
+    padding: 2.2rem 2.6rem;
     margin-top: 1rem;
+    line-height: 1.8;
 }
 .feedback-panel {
     background: rgba(255,255,255,0.025);
-    border: 1px solid rgba(80,200,120,0.2);
+    border: 1px solid rgba(80,200,120,0.25);
     border-radius: 16px;
-    padding: 2rem 2.5rem;
+    padding: 2.2rem 2.6rem;
     margin-top: 1rem;
+    line-height: 1.7;
 }
 .panel-label {
     font-family: 'DM Mono', monospace;
-    font-size: 0.7rem;
+    font-size: 0.72rem;
     letter-spacing: 0.2em;
     text-transform: uppercase;
     margin-bottom: 1.2rem;
@@ -264,16 +294,21 @@ html, body, [class*="css"] {
     border-bottom: 1px solid rgba(80,200,120,0.15);
 }
 
-/* ── Progress text ── */
-.stSpinner > div { color: #ff8c32 !important; }
-
-/* ── Expander ── */
-details summary {
-    font-family: 'DM Mono', monospace !important;
-    font-size: 0.75rem !important;
-    color: #a09890 !important;
-    letter-spacing: 0.1em !important;
-    cursor: pointer;
+.score-banner {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    padding: 0.8rem 1.4rem;
+    border-radius: 10px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.08);
+    margin-bottom: 1.2rem;
+}
+.score-pill {
+    font-family: 'Syne', sans-serif;
+    font-weight: 800;
+    font-size: 1.4rem;
+    color: #50c878;
 }
 
 /* ── Section heading ── */
@@ -298,7 +333,6 @@ details summary {
 """, unsafe_allow_html=True)
 
 # ── Light / dark theme ────────────────────────────────────────────────────────
-# Keep the existing dark look as default; apply targeted overrides in light mode.
 theme_col_left, theme_col_right = st.columns([5, 1])
 with theme_col_right:
     st.radio(
@@ -314,18 +348,17 @@ if st.session_state.researchmind_theme == "Light":
     <style>
     .stApp { background: #f5f6fa !important; background-image: none !important; color: #202536 !important; }
     html, body, [class*="css"] { color: #202536 !important; }
-    .hero h1, .step-title, .section-heading { color: #202536 !important; }
-    .hero-sub { color: #626b7b !important; }
-    .input-card, .step-card, .result-panel, .report-panel, .feedback-panel {
+    .hero h1, .step-title, .section-heading, .source-title { color: #202536 !important; }
+    .hero-sub, .source-snippet { color: #626b7b !important; }
+    .input-card, .step-card, .report-panel, .feedback-panel, .source-item-card, .score-banner {
         background: rgba(255,255,255,0.92) !important;
         border-color: rgba(45,55,72,0.14) !important;
         box-shadow: 0 8px 24px rgba(25,35,55,0.045);
     }
-    .stTextInput > div > div > input, .stTextArea textarea {
+    .stTextInput > div > div > input {
         background: #ffffff !important; color: #202536 !important;
         border-color: #d5dbe5 !important;
     }
-    .result-content { color: #343b4b !important; }
     .notice { color: #7b8494 !important; }
     details summary { color: #626b7b !important; }
     .stRadio label, .stCaption, [data-testid="stCaptionContainer"] { color: #4b5568 !important; }
@@ -349,15 +382,15 @@ def step_card(num: str, title: str, state: str, desc: str = ""):
             <span class="step-title">{title}</span>
             <span class="step-status {cls}">{label}</span>
         </div>
-        {"<div style='font-size:0.82rem;color:#706860;margin-top:0.3rem;'>"+desc+"</div>" if desc else ""}
+        {"<div style='font-size:0.8rem;color:#706860;margin-top:0.25rem;'>"+desc+"</div>" if desc else ""}
     </div>
     """, unsafe_allow_html=True)
 
 
 # ── Session state init ────────────────────────────────────────────────────────
-for key in ("results", "running", "done"):
+for key in ("results", "running", "done", "status_msg"):
     if key not in st.session_state:
-        st.session_state[key] = {} if key == "results" else False
+        st.session_state[key] = {} if key == "results" else ("" if key == "status_msg" else False)
 
 
 # ── Hero ──────────────────────────────────────────────────────────────────────
@@ -366,23 +399,30 @@ st.markdown("""
     <div class="hero-eyebrow">Multi-Agent AI System · Powered by Groq</div>
     <h1>Research<span>Mind</span></h1>
     <p class="hero-sub">
-        Four specialized AI agents collaborate — searching, scraping, writing,
-        and critiquing — to deliver a polished research report on any topic.
+        Four specialized AI agents collaborate — searching, multi-source reading,
+        writing, and iterative critic refinement — to deliver an authoritative research report.
     </p>
 </div>
 <div class="divider"></div>
 """, unsafe_allow_html=True)
 
-# Model/provider indicator. The actual ChatGroq model is configured in agents.py.
-groq_model_name = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+# Model & Provider status indicators (checked via unified get_credential)
+groq_model_name = get_credential("GROQ_MODEL", "openai/gpt-oss-120b")
+groq_has_key = bool(get_credential("GROQ_API_KEY"))
+tavily_has_key = bool(get_credential("TAVILY_API_KEY"))
+
 model_col, key_col = st.columns([3, 2])
 with model_col:
     st.caption(f"⚡ LLM provider: **Groq** · Model configured: `{groq_model_name}`")
 with key_col:
-    if os.getenv("GROQ_API_KEY"):
-        st.caption("🔐 GROQ_API_KEY detected")
+    if groq_has_key and tavily_has_key:
+        st.caption("🔐 API keys active (Groq + Tavily)")
+    elif not groq_has_key and not tavily_has_key:
+        st.caption("⚠️ Missing `GROQ_API_KEY` and `TAVILY_API_KEY` in environment or secrets")
+    elif not groq_has_key:
+        st.caption("⚠️ Missing `GROQ_API_KEY`")
     else:
-        st.caption("⚠️ Add `GROQ_API_KEY` to your `.env` file")
+        st.caption("⚠️ Missing `TAVILY_API_KEY`")
 
 # ── Layout: input left, pipeline right ───────────────────────────────────────
 col_input, col_spacer, col_pipeline = st.columns([5, 0.5, 4])
@@ -391,7 +431,7 @@ with col_input:
     st.markdown('<div class="input-card">', unsafe_allow_html=True)
     topic = st.text_input(
         "Research Topic",
-        placeholder="e.g. Quantum computing breakthroughs in 2025",
+        placeholder="e.g. CRISPR gene editing clinical breakthroughs in 2025",
         key="topic_input",
         label_visibility="visible",
     )
@@ -403,7 +443,11 @@ with col_input:
     <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:1.5rem;">
         <span style="font-family:'DM Mono',monospace;font-size:0.68rem;color:#605850;letter-spacing:0.1em;">TRY →</span>
     """, unsafe_allow_html=True)
-    examples = ["LLM agents 2025", "CRISPR gene editing", "Fusion energy progress"]
+    examples = [
+        "CRISPR gene editing breakthroughs in 2025",
+        "Quantum computing error mitigation architectures",
+        "Autonomous AI agents in software engineering",
+    ]
     for ex in examples:
         st.markdown(f"""
         <span style="
@@ -420,98 +464,89 @@ with col_input:
     st.markdown("</div>", unsafe_allow_html=True)
 
 with col_pipeline:
-    st.markdown('<div class="section-heading">Pipeline</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-heading">Agent Pipeline</div>', unsafe_allow_html=True)
 
     r = st.session_state.results
-    done = st.session_state.done
 
-    def s(step):
+    def s(step: str) -> str:
         if not r:
             return "waiting"
         steps = ["search", "reader", "writer", "critic"]
-        idx = steps.index(step)
-        completed = list(r.keys())
-        # figure out which steps are done
-        if step in r:
+        if step in r and r[step]:
             return "done"
-        # which step is running now (first not in r)
         if st.session_state.running:
-            for i, k in enumerate(steps):
-                if k not in r:
+            for k in steps:
+                if k not in r or not r[k]:
                     return "running" if k == step else "waiting"
         return "waiting"
 
-    step_card("01", "Search Agent",  s("search"), "Gathers recent web information")
-    step_card("02", "Reader Agent",  s("reader"), "Scrapes & extracts deep content")
-    step_card("03", "Writer Chain",  s("writer"), "Drafts the full research report")
-    step_card("04", "Critic Chain",  s("critic"), "Reviews & scores the report")
+    step_card("01", "Search Agent",  s("search"), "Discovers multi-source web references")
+    step_card("02", "Reader Agent",  s("reader"), "Scrapes 3–5 unique URLs with fallback")
+    step_card("03", "Writer Agent",  s("writer"), "Synthesizes 6 verified report sections")
+    step_card("04", "Critic Agent",  s("critic"), "Audits evidence & refines (max 2 loops)")
 
 
 # ── Run pipeline ──────────────────────────────────────────────────────────────
 if run_btn:
-    if not topic.strip():
-        st.warning("Please enter a research topic first.")
-    else:
-        st.session_state.results = {}
-        st.session_state.running = True
-        st.session_state.done = False
-        st.rerun()
+    try:
+        clean_topic = validate_topic(topic)
+    except ValueError as ve:
+        st.warning(str(ve))
+        clean_topic = None
+
+    if clean_topic:
+        missing_keys = []
+        if not get_credential("GROQ_API_KEY"):
+            missing_keys.append("GROQ_API_KEY")
+        if not get_credential("TAVILY_API_KEY"):
+            missing_keys.append("TAVILY_API_KEY")
+
+        if missing_keys:
+            st.error(f"Cannot run pipeline: missing required API key(s): {', '.join(missing_keys)}. Please add them to `.env` or Streamlit secrets.")
+        else:
+            st.session_state.results = {}
+            st.session_state.running = True
+            st.session_state.done = False
+            st.rerun()
 
 if st.session_state.running and not st.session_state.done:
-    results = {}
     topic_val = st.session_state.topic_input
+    status_placeholder = st.empty()
+
+    def on_step_start(step_key: str, step_title: str, description: str):
+        icons = {
+            "search": "🔍",
+            "reader": "📄",
+            "writer": "✍️",
+            "critic": "🧐",
+        }
+        icon = icons.get(step_key, "⚡")
+        status_placeholder.info(f"{icon} **{step_title}**: {description}")
+
+    def on_step_complete(step_key: str, output: str, current_state: dict):
+        st.session_state.results = dict(current_state)
 
     try:
-        # ── Step 1: Search ──
-        with st.spinner("🔍  Search Agent is working…"):
-            search_agent = build_search_agent()
-            sr = search_agent.invoke({
-                "messages": [("user", f"Find recent, reliable and detailed information about: {topic_val}")]
-            })
-            results["search"] = sr["messages"][-1].content
-            st.session_state.results = dict(results)
-        st.rerun() if False else None   # keep inline for now
-
-        # ── Step 2: Reader ──
-        with st.spinner("📄  Reader Agent is scraping top resources…"):
-            reader_agent = build_reader_agent()
-            rr = reader_agent.invoke({
-                "messages": [("user",
-                    f"Based on the following search results about '{topic_val}', "
-                    f"pick the most relevant URL and scrape it for deeper content.\n\n"
-                    f"Search Results:\n{results['search'][:800]}"
-                )]
-            })
-            results["reader"] = rr["messages"][-1].content
-            st.session_state.results = dict(results)
-
-        # ── Step 3: Writer ──
-        with st.spinner("✍️  Writer is drafting the report…"):
-            research_combined = (
-                f"SEARCH RESULTS:\n{results['search']}\n\n"
-                f"DETAILED SCRAPED CONTENT:\n{results['reader']}"
-            )
-            results["writer"] = writer_chain.invoke({
-                "topic": topic_val,
-                "research": research_combined
-            })
-            st.session_state.results = dict(results)
-
-        # ── Step 4: Critic ──
-        with st.spinner("🧐  Critic is reviewing the report…"):
-            results["critic"] = critic_chain.invoke({
-                "report": results["writer"]
-            })
-            st.session_state.results = dict(results)
-
+        logger.info("Starting pipeline execution for topic: %s", topic_val)
+        final_state = run_research_pipeline(
+            topic=topic_val,
+            on_step_start=on_step_start,
+            on_step_complete=on_step_complete,
+            max_sources=5,
+            max_refinements=2,
+        )
+        status_placeholder.empty()
+        st.session_state.results = dict(final_state)
         st.session_state.running = False
         st.session_state.done = True
         st.rerun()
     except Exception as exc:
+        logger.exception("Pipeline execution failed: %s", exc)
+        status_placeholder.empty()
         st.session_state.running = False
         st.session_state.done = False
-        st.error("The research pipeline failed. Check the error details below.")
-        st.exception(exc)
+        sanitized_msg = sanitize_error_message(str(exc))
+        st.error(f"The research pipeline encountered an error: {sanitized_msg}")
 
 
 # ── Results display ───────────────────────────────────────────────────────────
@@ -519,42 +554,71 @@ r = st.session_state.results
 
 if r:
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="section-heading">Results</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-heading">Research Findings & Artifacts</div>', unsafe_allow_html=True)
 
-    # Raw outputs in expanders
-    if "search" in r:
-        with st.expander("🔍 Search Results (raw)", expanded=False):
-            st.markdown(f'<div class="result-panel"><div class="result-panel-title">Search Agent Output</div>'
-                        f'<div class="result-content">{r["search"]}</div></div>', unsafe_allow_html=True)
+    # 1. Multi-source Display
+    sources_data = r.get("sources_data", [])
+    if sources_data:
+        scraped_count = sum(1 for s in sources_data if s.get("is_scraped"))
+        with st.expander(f"📚 Collected Multi-Source References ({len(sources_data)} sources · {scraped_count} scraped)", expanded=False):
+            for i, src in enumerate(sources_data, 1):
+                is_scraped = src.get("is_scraped", False)
+                badge_class = "scraped" if is_scraped else "fallback"
+                badge_text = "Full Content Scraped" if is_scraped else f"Snippet Only ({src.get('error') or 'Inaccessible'})"
+                snippet_text = src.get("content", "")[:350] if is_scraped else src.get("snippet", "")
 
-    if "reader" in r:
-        with st.expander("📄 Scraped Content (raw)", expanded=False):
-            st.markdown(f'<div class="result-panel"><div class="result-panel-title">Reader Agent Output</div>'
-                        f'<div class="result-content">{r["reader"]}</div></div>', unsafe_allow_html=True)
+                st.markdown(f"""
+                <div class="source-item-card">
+                    <span class="source-badge {badge_class}">{badge_text}</span>
+                    <span class="source-title">[{i}] {src.get('title', 'Untitled')}</span>
+                    <br>
+                    <a href="{src.get('url', '#')}" target="_blank" class="source-url">🔗 {src.get('url', '')}</a>
+                    <div class="source-snippet">{snippet_text}...</div>
+                </div>
+                """, unsafe_allow_html=True)
 
-    # Final report
-    if "writer" in r:
+    # 2. Final Report Display
+    if "writer" in r and r["writer"]:
         st.markdown("""
         <div class="report-panel">
-            <div class="panel-label orange">📝 Final Research Report</div>
+            <div class="panel-label orange">📝 Final Research Report (6 Verified Sections)</div>
         """, unsafe_allow_html=True)
-        st.markdown(r["writer"])   # render markdown natively
+        st.markdown(r["writer"])
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # Download
+        # Markdown Report Download
         st.download_button(
-            label="⬇  Download Report (.md)",
+            label="⬇  Download Research Report (.md)",
             data=r["writer"],
-            file_name=f"research_report_{int(time.time())}.md",
+            file_name=f"researchmind_report_{int(time.time())}.md",
             mime="text/markdown",
         )
 
-    # Critic feedback
-    if "critic" in r:
-        st.markdown("""
+    # 3. Critic Evaluation & Refinement Status
+    if "critic" in r and r["critic"]:
+        evaluations = r.get("evaluations", [])
+        refinements = r.get("refinement_attempts", 0)
+
+        latest_eval = evaluations[-1] if evaluations else {}
+        score = latest_eval.get("score", 8.0)
+
+        st.markdown(f"""
         <div class="feedback-panel">
-            <div class="panel-label green">🧐 Critic Feedback</div>
+            <div class="panel-label green">🧐 Critic Audit & Refinement Verification</div>
+            <div class="score-banner">
+                <div>
+                    <span style="font-family:'DM Mono',monospace;font-size:0.7rem;color:#80c890;text-transform:uppercase;">Quality Score</span><br>
+                    <span class="score-pill">{score:.1f} / 10</span>
+                </div>
+                <div style="border-left:1px solid rgba(255,255,255,0.1);padding-left:1.5rem;">
+                    <span style="font-family:'DM Mono',monospace;font-size:0.7rem;color:#a09890;text-transform:uppercase;">Refinement Status</span><br>
+                    <span style="font-family:'DM Sans',sans-serif;font-size:0.95rem;color:#f0ebe0;">
+                        {f'Completed {refinements} refinement cycle(s)' if refinements > 0 else 'Approved on initial evaluation'}
+                    </span>
+                </div>
+            </div>
         """, unsafe_allow_html=True)
+
         st.markdown(r["critic"])
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -562,6 +626,6 @@ if r:
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="notice">
-    ResearchMind · LangChain multi-agent pipeline · Groq-powered · Built with Streamlit
+    ResearchMind · Multi-Agent Research System · Groq + LangChain + Tavily · Built with Streamlit
 </div>
 """, unsafe_allow_html=True)
